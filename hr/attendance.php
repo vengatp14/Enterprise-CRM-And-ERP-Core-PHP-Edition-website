@@ -17,12 +17,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'punch_in') {
         // Latitude/longitude come from the browser's own Geolocation API,
         // captured into these hidden fields just before submit — see the
-        // script at the bottom of this page. Never a fixed/office
-        // coordinate: if the browser couldn't get a location, these
-        // simply arrive empty and the punch is still recorded (existing
-        // behavior), just without a location attached.
+        // script at the bottom of this page. Location is mandatory: the
+        // form only submits once a real position has been obtained, and
+        // this check backs that up server-side (attendance_location_is_valid()
+        // in includes/hr.php) so attendance can never be created without it,
+        // even via a direct POST that bypasses the frontend.
         $lat = ($_POST['latitude'] ?? '') !== '' ? (float) $_POST['latitude'] : null;
         $lng = ($_POST['longitude'] ?? '') !== '' ? (float) $_POST['longitude'] : null;
+        if (!attendance_location_is_valid($lat, $lng)) {
+            flash_set('error', 'Location access is required to mark attendance. Please allow location access and try again.');
+            redirect('hr/attendance.php');
+        }
         if (!punch_in($currentUserId, $lat, $lng)) {
             flash_set('error', "You've already punched in today.");
         } else {
@@ -34,6 +39,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'punch_out') {
         $lat = ($_POST['latitude'] ?? '') !== '' ? (float) $_POST['latitude'] : null;
         $lng = ($_POST['longitude'] ?? '') !== '' ? (float) $_POST['longitude'] : null;
+        if (!attendance_location_is_valid($lat, $lng)) {
+            flash_set('error', 'Location access is required to mark attendance. Please allow location access and try again.');
+            redirect('hr/attendance.php');
+        }
         punch_out($currentUserId, $lat, $lng);
         flash_set('status', 'Punched out at ' . date('H:i') . '.');
         redirect('hr/attendance.php');
@@ -103,47 +112,76 @@ require __DIR__ . '/../includes/navbar.php';
         <?php endif; ?>
         <span class="text-muted small d-none" id="punchLocationHint"><i class="bi bi-geo-alt"></i> Getting your location…</span>
     </div>
+    <div class="card-body pt-0 d-none" id="punchLocationError">
+        <div class="alert alert-warning py-2 px-3 mb-0 d-flex align-items-center justify-content-between flex-wrap gap-2">
+            <span class="small"><i class="bi bi-geo-alt-fill"></i> Location access is required to mark attendance. Please allow location access and try again.</span>
+            <button type="button" class="btn btn-sm btn-warning" id="punchLocationRetry">Retry</button>
+        </div>
+    </div>
 </div>
 
 <script nonce="<?= e(csp_nonce()) ?>">
-// Capture the device's actual coordinates (browser Geolocation API) at
-// the moment of punching in/out — never a fixed/office location — and
-// drop them into the hidden fields just before the form submits. If
-// permission is denied or a location can't be obtained, the fields
-// stay empty and the punch still goes through exactly as before
-// (see hr/attendance.php's punch_in/punch_out handling above).
+// Location is mandatory before attendance can be marked. Clicking
+// Punch In/Out no longer submits the form directly: it first requests
+// the device's actual coordinates (browser Geolocation API — never a
+// fixed/office location) and only submits, with those coordinates
+// attached, once a valid position has been obtained. If permission is
+// denied, unsupported, or the location can't be obtained, the request
+// is NOT sent — the user sees a message asking them to allow location
+// access and a Retry button (see hr/attendance.php's punch_in/punch_out
+// handling above, which also rejects any request missing a location).
 document.querySelectorAll('.js-punch-form').forEach(function (form) {
-    form.addEventListener('submit', function (e) {
-        var latField = form.querySelector('.js-punch-lat');
-        var lngField = form.querySelector('.js-punch-lng');
-        if (form.dataset.locationResolved === '1' || !('geolocation' in navigator)) {
-            return; // already have a location (or geolocation unsupported) — submit as-is
+    var latField = form.querySelector('.js-punch-lat');
+    var lngField = form.querySelector('.js-punch-lng');
+    var hint = document.getElementById('punchLocationHint');
+    var errorBox = document.getElementById('punchLocationError');
+    var submitBtn = form.querySelector('button[type="submit"]');
+
+    var requestLocation = function () {
+        if (errorBox) errorBox.classList.add('d-none');
+
+        if (!('geolocation' in navigator)) {
+            if (errorBox) errorBox.classList.remove('d-none');
+            return;
         }
-        e.preventDefault();
-        var hint = document.getElementById('punchLocationHint');
+
         if (hint) hint.classList.remove('d-none');
-        var submitBtn = form.querySelector('button[type="submit"]');
         if (submitBtn) submitBtn.disabled = true;
-        var finish = function () {
-            if (hint) hint.classList.add('d-none');
-            if (submitBtn) submitBtn.disabled = false;
-            form.dataset.locationResolved = '1';
-            form.submit();
-        };
+
         navigator.geolocation.getCurrentPosition(
             function (position) {
+                // Valid latitude/longitude obtained — continue automatically
+                // with the existing attendance submit flow.
                 latField.value = position.coords.latitude;
                 lngField.value = position.coords.longitude;
-                finish();
+                if (hint) hint.classList.add('d-none');
+                if (submitBtn) submitBtn.disabled = false;
+                form.dataset.locationResolved = '1';
+                form.submit();
             },
             function () {
-                // Denied or unavailable — proceed without a location,
-                // same as the existing attendance validation behavior.
-                finish();
+                // Denied, unavailable, or timed out — do NOT mark
+                // attendance. Keep it pending and offer a retry.
+                if (hint) hint.classList.add('d-none');
+                if (submitBtn) submitBtn.disabled = false;
+                if (errorBox) errorBox.classList.remove('d-none');
             },
             { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
         );
+    };
+
+    form.addEventListener('submit', function (e) {
+        if (form.dataset.locationResolved === '1') {
+            return; // valid location already obtained for this submit — let it through
+        }
+        e.preventDefault();
+        requestLocation();
     });
+
+    var retryBtn = document.getElementById('punchLocationRetry');
+    if (retryBtn) {
+        retryBtn.addEventListener('click', requestLocation);
+    }
 });
 </script>
 

@@ -12,8 +12,27 @@ declare(strict_types=1);
 // Attendance
 // ---------------------------------------------------------------------
 
+/**
+ * Location is mandatory for attendance: a punch is only ever recorded with
+ * real coordinates captured by the browser's Geolocation API at that moment
+ * (see the punch-in/out form on hr/attendance.php). This guards the backend
+ * itself so a punch can never be created without valid lat/lng, even if the
+ * frontend check is bypassed (e.g. a direct POST to this endpoint).
+ */
+function attendance_location_is_valid(?float $latitude, ?float $longitude): bool
+{
+    if ($latitude === null || $longitude === null) {
+        return false;
+    }
+    return $latitude >= -90 && $latitude <= 90 && $longitude >= -180 && $longitude <= 180;
+}
+
 function punch_in(int $userId, ?float $latitude = null, ?float $longitude = null): bool
 {
+    if (!attendance_location_is_valid($latitude, $longitude)) {
+        return false;
+    }
+
     $today = date('Y-m-d');
     $now = date('Y-m-d H:i:s');
 
@@ -29,9 +48,9 @@ function punch_in(int $userId, ?float $latitude = null, ?float $longitude = null
         'time'    => date('H:i:s'),
         // Only ever the device's own coordinates from the browser
         // Geolocation API (see the punch-in form on hr/attendance.php)
-        // — never a fixed/fallback location. If the browser couldn't
-        // get a location (denied permission, unsupported, timed out),
-        // these are simply null; the punch itself still succeeds.
+        // — never a fixed/fallback location. Location is now required
+        // (see attendance_location_is_valid() above), so these are
+        // always a real captured position by the time we get here.
         'lat'     => $latitude,
         'lng'     => $longitude,
         'created' => $now,
@@ -41,6 +60,10 @@ function punch_in(int $userId, ?float $latitude = null, ?float $longitude = null
 
 function punch_out(int $userId, ?float $latitude = null, ?float $longitude = null): bool
 {
+    if (!attendance_location_is_valid($latitude, $longitude)) {
+        return false;
+    }
+
     $stmt = db()->prepare(
         'UPDATE employee_attendance SET check_out_time = :time, check_out_latitude = :lat, check_out_longitude = :lng, updated_at = :now
          WHERE user_id = :uid AND attendance_date = :date'
